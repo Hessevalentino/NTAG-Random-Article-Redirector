@@ -1,4 +1,4 @@
-# 📡 NTAG Random Article Redirector
+# NTAG Random Article Redirector
 
 **Turn NFC keychains into a physical "random article" reader for your WordPress site.**
 
