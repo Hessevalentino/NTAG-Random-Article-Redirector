@@ -1,11 +1,11 @@
 <?php
 /**
- * ntag.airevue.cz – Random article redirect for airevue.cz
+ * NTAG Random Article Redirector for WordPress
  *
  * NFC NTAG keychain → this URL → WordPress REST API → 302 redirect to a random article.
  * No authentication required – reads only published posts (public endpoint wp/v2/posts).
  *
- * Location: ntag.airevue.cz/index.php
+ * Location: ntag.yoursite.com/index.php
  * Author:   Valentino Hesse (https://www.hesse.works)
  * Version:  1.2
  * License:  MIT
@@ -14,33 +14,34 @@
  * modified, author, relevance). Randomization is handled purely in PHP from a pool of posts.
  */
 
-// ── Konfigurace ──────────────────────────────────────────────────────────────
+// ── Configuration ────────────────────────────────────────────────────────────
 
-define('WP_API_BASE',  'https://airevue.cz/wp-json/wp/v2/posts');
-define('FALLBACK_URL', 'https://airevue.cz');
+define('WP_API_BASE',  'https://yoursite.com/wp-json/wp/v2/posts');   // ← change to your WP site
+define('FALLBACK_URL', 'https://yoursite.com');                        // ← fallback if API fails
 define('TIMEOUT_SEC',  5);
 
-// Kolik článků stáhnout jako pool pro náhodný výběr.
-// WP REST API maximum per_page je 100. Čím víc, tím větší variabilita,
-// ale taky větší payload. 50 je dobrý kompromis.
+// How many articles to fetch as a pool for random selection.
+// WP REST API maximum per_page is 100. More = greater variety,
+// but also a larger payload. 50 is a good compromise.
 define('POOL_SIZE', 50);
 
-// ── Funkce ───────────────────────────────────────────────────────────────────
+// ── Functions ────────────────────────────────────────────────────────────────
 
 /**
- * HTTP GET požadavek přes cURL (spolehlivější na WEDOS než file_get_contents).
+ * HTTP GET request via cURL (more reliable than file_get_contents on shared hosting).
  *
- * @param  string      $url  Cílová URL
- * @return string|null       Tělo odpovědi, nebo null při chybě / ne-200 odpovědi
+ * @param  string      $url  Target URL
+ * @return string|null       Response body, or null on error / non-200 response
  */
 function http_get(string $url): ?string
 {
     if (!function_exists('curl_init')) {
+        // Fallback to file_get_contents if cURL is not available
         $ctx = stream_context_create([
             'http' => [
                 'timeout'       => TIMEOUT_SEC,
                 'ignore_errors' => true,
-                'header'        => "User-Agent: ntag.airevue.cz/1.2\r\n",
+                'header'        => "User-Agent: ntag-wp-random-redirect/1.2\r\n",
             ],
         ]);
         $body = @file_get_contents($url, false, $ctx);
@@ -55,7 +56,7 @@ function http_get(string $url): ?string
         CURLOPT_CONNECTTIMEOUT => 3,
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_MAXREDIRS      => 2,
-        CURLOPT_USERAGENT      => 'ntag.airevue.cz/1.2',
+        CURLOPT_USERAGENT      => 'ntag-wp-random-redirect/1.2',
         CURLOPT_HTTPHEADER     => ['Accept: application/json'],
     ]);
 
@@ -71,18 +72,28 @@ function http_get(string $url): ?string
 }
 
 /**
- * Zavolá WordPress REST API, stáhne pool článků a vrátí URL náhodného z nich.
+ * Call WordPress REST API, fetch a pool of articles and return a random one's URL.
  *
- * @return string|null  URL článku, nebo null při chybě
+ * Strategy:
+ *  1. Request POOL_SIZE articles sorted by date from the API
+ *  2. Pick one at random in PHP using array_rand()
+ *  3. This guarantees randomness regardless of server-side caching
+ *
+ * @return string|null  Article URL, or null on error
  */
 function get_random_post_url(): ?string
 {
+    // Extract the domain from FALLBACK_URL for link validation
+    $allowed_domain = parse_url(FALLBACK_URL, PHP_URL_SCHEME)
+        . '://'
+        . parse_url(FALLBACK_URL, PHP_URL_HOST);
+
     $api_url = WP_API_BASE . '?' . http_build_query([
         'orderby'  => 'date',
         'order'    => 'desc',
         'status'   => 'publish',
         'per_page' => POOL_SIZE,
-        '_fields'  => 'link',
+        '_fields'  => 'link',           // only fetch URLs → minimal payload
     ]);
 
     $body = http_get($api_url);
@@ -97,13 +108,13 @@ function get_random_post_url(): ?string
         return null;
     }
 
-    // Vyfiltruj pouze validní položky se správnou doménou
+    // Filter only valid entries matching the expected domain (prevents open redirect)
     $valid = [];
     foreach ($posts as $post) {
         if (
             isset($post['link']) &&
             is_string($post['link']) &&
-            str_starts_with($post['link'], 'https://airevue.cz')
+            str_starts_with($post['link'], $allowed_domain)
         ) {
             $valid[] = $post['link'];
         }
@@ -113,15 +124,15 @@ function get_random_post_url(): ?string
         return null;
     }
 
-    // Náhodný výběr v PHP
+    // Random selection in PHP — works even if API ignores random ordering
     return $valid[array_rand($valid)];
 }
 
 /**
- * Provede HTTP redirect a ukončí script.
+ * Perform HTTP redirect and terminate the script.
  *
- * @param string $url   Cílová URL
- * @param int    $code  HTTP status kód (výchozí 302)
+ * @param string $url   Target URL
+ * @param int    $code  HTTP status code (default 302)
  */
 function redirect(string $url, int $code = 302): never
 {
@@ -129,18 +140,19 @@ function redirect(string $url, int $code = 302): never
     exit;
 }
 
-// ── Hlavní logika ─────────────────────────────────────────────────────────────
+// ── Main logic ───────────────────────────────────────────────────────────────
 
-// Zakázat cachování této response (browser i proxy)
+// Prevent caching of this response (browser + proxy)
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
 header('Expires: Thu, 01 Jan 1970 00:00:00 GMT');
-header('X-Powered-By: ntag.airevue.cz');
+header('X-Powered-By: ntag-wp-random-redirect');
 
 $url = get_random_post_url();
 
 if ($url !== null) {
     redirect($url);
 } else {
+    // API failed → redirect to homepage
     redirect(FALLBACK_URL);
 }
